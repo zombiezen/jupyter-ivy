@@ -290,7 +290,10 @@ func (s *concurrent0MQSocket) RecvMessage(ctx context.Context) ([][]byte, error)
 		}
 	}
 
-	return s.socket.RecvMessage()
+	s.mu.Lock()
+	b, err = s.socket.RecvMessage()
+	s.mu.Unlock()
+	return b, err
 }
 
 func (s *concurrent0MQSocket) SendMessage(ctx context.Context, msg [][]byte) error {
