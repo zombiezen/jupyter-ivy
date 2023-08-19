@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -47,16 +48,36 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 		return err
 	}
 
-	heartbeatSocket := goczmq.NewRepChanneler(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.HeartbeatPort))
-	defer heartbeatSocket.Destroy()
-	iopubSocket := goczmq.NewPubChanneler(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.IOPubPort))
-	defer iopubSocket.Destroy()
-	controlSocket := goczmq.NewRouterChanneler(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ControlPort))
-	defer controlSocket.Destroy()
-	stdinSocket := goczmq.NewRouterChanneler(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.StdinPort))
-	defer stdinSocket.Destroy()
-	shellSocket := goczmq.NewRouterChanneler(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ShellPort))
-	defer shellSocket.Destroy()
+	rawHeartbeatSocket, err := goczmq.NewRep(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.HeartbeatPort))
+	if err != nil {
+		return err
+	}
+	heartbeatSocket := wrapSocket(rawHeartbeatSocket)
+	defer heartbeatSocket.Close()
+	rawIOPubSocket, err := goczmq.NewPub(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.IOPubPort))
+	if err != nil {
+		return err
+	}
+	iopubSocket := wrapSocket(rawIOPubSocket)
+	defer iopubSocket.Close()
+	rawControlSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ControlPort))
+	if err != nil {
+		return err
+	}
+	controlSocket := wrapSocket(rawControlSocket)
+	defer controlSocket.Close()
+	rawStdinSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.StdinPort))
+	if err != nil {
+		return err
+	}
+	stdinSocket := wrapSocket(rawStdinSocket)
+	defer stdinSocket.Close()
+	rawShellSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ShellPort))
+	if err != nil {
+		return err
+	}
+	shellSocket := wrapSocket(rawShellSocket)
+	defer shellSocket.Close()
 
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -69,12 +90,12 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		drainSocket(ctx, iopubSocket.RecvChan)
+		drainSocket(ctx, iopubSocket)
 	}()
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		drainSocket(ctx, stdinSocket.RecvChan)
+		drainSocket(ctx, stdinSocket)
 	}()
 	wg.Add(1)
 	go func() {
@@ -84,19 +105,19 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 
 	log.Infof(ctx, "Kernel ready (Ivy %s)", ivyVersion())
 	h := &handler{
-		auth:            cfg.Authentication(),
-		sessionID:       sessionID.String(),
-		shellSocketSend: shellSocket.SendChan,
-		iopubSocketSend: iopubSocket.SendChan,
-		ivyContext:      exec.NewContext(new(config.Config)),
+		auth:        cfg.Authentication(),
+		sessionID:   sessionID.String(),
+		shellSocket: shellSocket,
+		iopubSocket: iopubSocket,
+		ivyContext:  exec.NewContext(new(config.Config)),
 	}
 	for {
-		var rawMessage [][]byte
-		select {
-		case rawMessage = <-shellSocket.RecvChan:
-		case <-ctx.Done():
+		rawMessage, err := shellSocket.RecvMessage(ctx)
+		if err != nil {
+			log.Debugf(ctx, "Shell socket disconnected: %v", err)
 			return nil
 		}
+		log.Debugf(ctx, "Request payload: %s", rawMessage)
 		msg := new(WireMessage)
 		if err := msg.Unmarshal(cfg.Authentication(), rawMessage); err != nil {
 			log.Errorf(ctx, "%v", err)
@@ -118,20 +139,47 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 			if err := h.kernelInfo(ctx, msg); err != nil {
 				log.Errorf(ctx, "Responding to kernel info request: %v", err)
 			}
-		case "history_request":
-			log.Debugf(ctx, "Unhandled shell history request")
+		case "is_complete_request":
+			err := h.reply(ctx, h.shellSocket, "is_complete_reply", msg.Identities, msg.RawHeader, map[string]any{
+				"status": "unknown",
+			})
+			if err != nil {
+				log.Errorf(ctx, "Responding to unhandled %q: %v", hdr.Type, err)
+			}
+			err = h.reply(ctx, h.iopubSocket, "status", nil, msg.RawHeader, StatusResponse{
+				ExecutionState: "idle",
+			})
+			if err != nil {
+				return err
+			}
 		default:
 			log.Warnf(ctx, "Unhandled shell request type %q", hdr.Type)
+			base, ok := strings.CutSuffix(hdr.Type, "_request")
+			if !ok {
+				continue
+			}
+			err := h.reply(ctx, h.shellSocket, base+"_reply", msg.Identities, msg.RawHeader, &ErrorReply{
+				ExceptionName: "NotImplementedError",
+			})
+			if err != nil {
+				log.Errorf(ctx, "Responding to unhandled %q: %v", hdr.Type, err)
+			}
+			err = h.reply(ctx, h.iopubSocket, "status", nil, msg.RawHeader, StatusResponse{
+				ExecutionState: "idle",
+			})
+			if err != nil {
+				return err
+			}
 		}
 	}
 }
 
 type handler struct {
-	sessionID       string
-	auth            Authentication
-	shellSocketSend chan<- [][]byte
-	iopubSocketSend chan<- [][]byte
-	ivyContext      value.Context
+	sessionID   string
+	auth        Authentication
+	shellSocket *concurrent0MQSocket
+	iopubSocket *concurrent0MQSocket
+	ivyContext  value.Context
 
 	executionCounter int
 }
@@ -142,7 +190,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 		return err
 	}
 
-	err := h.reply(ctx, h.iopubSocketSend, "status", nil, req.RawHeader, StatusResponse{
+	err := h.reply(ctx, h.iopubSocket, "status", nil, req.RawHeader, StatusResponse{
 		ExecutionState: "busy",
 	})
 	if err != nil {
@@ -152,7 +200,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 	if reqContent.StoreHistory {
 		h.executionCounter++
 	}
-	err = h.reply(ctx, h.iopubSocketSend, "execute_input", nil, req.RawHeader, map[string]any{
+	err = h.reply(ctx, h.iopubSocket, "execute_input", nil, req.RawHeader, map[string]any{
 		"code":            reqContent.Code,
 		"execution_count": executionCount,
 	})
@@ -165,7 +213,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 	ivyrun.Ivy(h.ivyContext, reqContent.Code, stdout, stderr)
 
 	if stderr.Len() > 0 {
-		err := h.reply(ctx, h.iopubSocketSend, "stream", nil, req.RawHeader, StreamResponse{
+		err := h.reply(ctx, h.iopubSocket, "stream", nil, req.RawHeader, StreamResponse{
 			Name: "stderr",
 			Text: stderr.String(),
 		})
@@ -173,7 +221,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 			return err
 		}
 	}
-	err = h.reply(ctx, h.iopubSocketSend, "execute_result", nil, req.RawHeader, ExecuteResult{
+	err = h.reply(ctx, h.iopubSocket, "execute_result", nil, req.RawHeader, ExecuteResult{
 		ExecutionCount: executionCount,
 		DisplayData: DisplayData{
 			Data: map[string]any{
@@ -184,13 +232,13 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 	if err != nil {
 		return err
 	}
-	err = h.reply(ctx, h.iopubSocketSend, "status", nil, req.RawHeader, StatusResponse{
+	err = h.reply(ctx, h.iopubSocket, "status", nil, req.RawHeader, StatusResponse{
 		ExecutionState: "idle",
 	})
 	if err != nil {
 		return err
 	}
-	err = h.reply(ctx, h.shellSocketSend, "execute_reply", req.Identities, req.RawHeader, ExecuteReply{
+	err = h.reply(ctx, h.shellSocket, "execute_reply", req.Identities, req.RawHeader, ExecuteReply{
 		Status:         "ok",
 		ExecutionCount: executionCount,
 	})
@@ -202,7 +250,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 }
 
 func (h *handler) kernelInfo(ctx context.Context, req *WireMessage) error {
-	err := h.reply(ctx, h.shellSocketSend, "kernel_info_reply", req.Identities, req.RawHeader, map[string]any{
+	err := h.reply(ctx, h.shellSocket, "kernel_info_reply", req.Identities, req.RawHeader, map[string]any{
 		"protocol_version": protocolVersion,
 
 		"implementation":         "ivy",
@@ -219,7 +267,7 @@ func (h *handler) kernelInfo(ctx context.Context, req *WireMessage) error {
 	if err != nil {
 		return err
 	}
-	err = h.reply(ctx, h.iopubSocketSend, "status", nil, req.RawHeader, StatusResponse{
+	err = h.reply(ctx, h.iopubSocket, "status", nil, req.RawHeader, StatusResponse{
 		ExecutionState: "idle",
 	})
 	if err != nil {
@@ -229,64 +277,51 @@ func (h *handler) kernelInfo(ctx context.Context, req *WireMessage) error {
 	return nil
 }
 
-func (h *handler) reply(ctx context.Context, send chan<- [][]byte, typ string, identities [][]byte, parentHeader json.RawMessage, content any) error {
+func (h *handler) reply(ctx context.Context, send *concurrent0MQSocket, typ string, identities [][]byte, parentHeader json.RawMessage, content any) error {
 	response, err := NewWireMessage(typ, h.sessionID, content)
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
 	}
+	response.Identities = identities
 	response.RawParentHeader = parentHeader
 	responseMessage, err := response.Marshal(h.auth)
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
 	}
 	switch send {
-	case h.shellSocketSend:
+	case h.shellSocket:
 		log.Debugf(ctx, "Replying with %q message to shell socket", typ)
-	case h.iopubSocketSend:
+	case h.iopubSocket:
 		log.Debugf(ctx, "Replying with %q message to I/O publish socket", typ)
 	default:
 		log.Debugf(ctx, "Replying with %q message to unknown socket", typ)
 	}
 	log.Debugf(ctx, "Payload: %s", responseMessage)
-	select {
-	case send <- responseMessage:
-		log.Debugf(ctx, "Sent %q message", typ)
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("send message: %w", err)
+	if err := send.SendMessage(ctx, responseMessage); err != nil {
+		return err
 	}
+	log.Debugf(ctx, "Sent %q message", typ)
+	return nil
 }
 
-func heartbeatLoop(ctx context.Context, sock *goczmq.Channeler) {
-	defer log.Debugf(ctx, "Heartbeat finished")
+func heartbeatLoop(ctx context.Context, sock *concurrent0MQSocket) {
 	for {
-		select {
-		case frame, ok := <-sock.RecvChan:
-			if !ok {
-				return
-			}
-			log.Debugf(ctx, "Heartbeat")
-			select {
-			case sock.SendChan <- frame:
-			case <-ctx.Done():
-				return
-			}
-		case <-ctx.Done():
+		msg, err := sock.RecvMessage(ctx)
+		if err != nil {
+			log.Debugf(ctx, "No longer receiving heartbeats: %v", err)
 			return
+		}
+		if err := sock.SendMessage(ctx, msg); err != nil {
+			log.Debugf(ctx, "Failed to send heartbeat: %v", err)
 		}
 	}
 }
 
-func handleControl(ctx context.Context, auth Authentication, sock *goczmq.Channeler, cancel context.CancelFunc) {
+func handleControl(ctx context.Context, auth Authentication, sock *concurrent0MQSocket, cancel context.CancelFunc) {
 	for {
-		var rawMessage [][]byte
-		var ok bool
-		select {
-		case rawMessage, ok = <-sock.RecvChan:
-			if !ok {
-				return
-			}
-		case <-ctx.Done():
+		rawMessage, err := sock.RecvMessage(ctx)
+		if err != nil {
+			log.Errorf(ctx, "Control socket disconnected: %v", err)
 			return
 		}
 		msg := new(WireMessage)
@@ -307,14 +342,9 @@ func handleControl(ctx context.Context, auth Authentication, sock *goczmq.Channe
 	}
 }
 
-func drainSocket(ctx context.Context, sock <-chan [][]byte) {
+func drainSocket(ctx context.Context, sock *concurrent0MQSocket) {
 	for {
-		select {
-		case _, ok := <-sock:
-			if !ok {
-				return
-			}
-		case <-ctx.Done():
+		if _, err := sock.RecvMessage(ctx); err != nil {
 			return
 		}
 	}
@@ -388,7 +418,7 @@ func initLogging(showDebug bool) {
 		}
 		log.SetDefault(&log.LevelFilter{
 			Min:    minLogLevel,
-			Output: log.New(os.Stderr, "jupypter-ivy: ", log.StdFlags, nil),
+			Output: log.New(os.Stderr, "jupyter-ivy: ", log.StdFlags, nil),
 		})
 	})
 }

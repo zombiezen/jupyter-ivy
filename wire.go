@@ -2,15 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/zeromq/goczmq"
 	"golang.org/x/exp/slices"
 )
 
@@ -32,7 +36,7 @@ type WireMessage struct {
 	RawParentHeader json.RawMessage
 	Metadata        json.RawMessage
 	Content         json.RawMessage
-	ExtraFrames     [][]byte
+	Buffers         [][]byte
 }
 
 func NewWireMessage(typ, session string, content any) (*WireMessage, error) {
@@ -67,7 +71,7 @@ func (msg *WireMessage) Marshal(auth Authentication) ([][]byte, error) {
 	sigHex := make([]byte, hex.EncodedLen(len(sig)))
 	hex.Encode(sigHex, sig)
 
-	result := make([][]byte, 0, len(msg.Identities)+6+len(msg.ExtraFrames))
+	result := make([][]byte, 0, len(msg.Identities)+6+len(msg.Buffers))
 	result = append(result, msg.Identities...)
 	result = append(result,
 		[]byte(delim),
@@ -77,7 +81,7 @@ func (msg *WireMessage) Marshal(auth Authentication) ([][]byte, error) {
 		msg.Metadata,
 		msg.Content,
 	)
-	result = append(result, msg.ExtraFrames...)
+	result = append(result, msg.Buffers...)
 	return result, nil
 }
 
@@ -109,11 +113,11 @@ func (msg *WireMessage) Unmarshal(auth Authentication, message [][]byte) error {
 	if err := json.Unmarshal(tail[4], &msg.Content); err != nil {
 		return fmt.Errorf("unmarshal jupyter wire message: content: %v", err)
 	}
-	msg.ExtraFrames = tail[5:]
+	msg.Buffers = tail[5:]
 
 	if want, err := msg.Sign(auth); err != nil {
 		return fmt.Errorf("unmarshal jupyter wire message: %v", err)
-	} else if bytes.Equal(want, sig) {
+	} else if !bytes.Equal(want, sig) {
 		return fmt.Errorf("unmarshal jupyter wire message: invalid signature")
 	}
 	return nil
@@ -136,7 +140,7 @@ func (msg *WireMessage) Sign(auth Authentication) ([]byte, error) {
 	h.Write(msg.RawParentHeader)
 	h.Write(msg.Metadata)
 	h.Write(msg.Content)
-	for _, extra := range msg.ExtraFrames {
+	for _, extra := range msg.Buffers {
 		h.Write(extra)
 	}
 	return h.Sum(nil), nil
@@ -220,4 +224,87 @@ type ExecuteReply struct {
 	Status          string            `json:"status"` // ok, error, or aborted
 	ExecutionCount  int               `json:"execution_count"`
 	UserExpressions map[string]string `json:"user_expressions,omitempty"`
+}
+
+type ErrorReply struct {
+	ExceptionName  string
+	ExceptionValue string
+	Traceback      []string
+}
+
+func (reply *ErrorReply) MarshalJSON() ([]byte, error) {
+	var normalized struct {
+		Status         string   `json:"status"`
+		ExceptionName  string   `json:"ename"`
+		ExceptionValue string   `json:"evalue"`
+		Traceback      []string `json:"traceback,omitempty"`
+	}
+	normalized.Status = "error"
+	normalized.ExceptionName = reply.ExceptionName
+	normalized.ExceptionValue = reply.ExceptionValue
+	normalized.Traceback = reply.Traceback
+	if len(normalized.Traceback) == 0 {
+		normalized.Traceback = nil
+	}
+	return json.Marshal(normalized)
+}
+
+type concurrent0MQSocket struct {
+	poll *goczmq.Poller
+
+	mu     sync.Mutex
+	socket *goczmq.Sock
+}
+
+func wrapSocket(socket *goczmq.Sock) *concurrent0MQSocket {
+	poll, err := goczmq.NewPoller(socket)
+	if err != nil {
+		panic(err)
+	}
+	return &concurrent0MQSocket{
+		socket: socket,
+		poll:   poll,
+	}
+}
+
+func (s *concurrent0MQSocket) RecvMessage(ctx context.Context) ([][]byte, error) {
+	s.mu.Lock()
+	b, err := s.socket.RecvMessageNoWait()
+	s.mu.Unlock()
+	if err == nil || !errors.Is(err, goczmq.ErrRecvMessage) {
+		return b, err
+	}
+
+	const maxWait = 2 * time.Second
+	for waitTime := 1 * time.Millisecond; ; {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("receive message: %w", ctx.Err())
+		}
+		// TODO(now): Does this race? Not holding mutex.
+		if s.poll.Wait(int(waitTime/time.Millisecond)) != nil {
+			break
+		}
+		waitTime *= 2
+		if waitTime > maxWait {
+			waitTime = maxWait
+		}
+	}
+
+	return s.socket.RecvMessage()
+}
+
+func (s *concurrent0MQSocket) SendMessage(ctx context.Context, msg [][]byte) error {
+	// TODO(someday):
+	s.mu.Lock()
+	err := s.socket.SendMessage(msg)
+	s.mu.Unlock()
+	return err
+}
+
+func (s *concurrent0MQSocket) Close() error {
+	s.mu.Lock()
+	s.poll.Destroy()
+	s.socket.Destroy()
+	s.mu.Unlock()
+	return nil
 }

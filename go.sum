@@ -21,8 +21,6 @@ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
 robpike.io/ivy v0.2.11 h1:cIg2WaBFf7deMzbPE78Yr+nxBwBYY7LcP4vmh8tcH+k=
 robpike.io/ivy v0.2.11/go.mod h1:+88JaiRY38VdNIKU7FYq5LSgqpdTi9GthjBeu1jRER0=
-robpike.io/ivy v0.3.1 h1:RNXhZvYTT0qJKi3N/LkF/9Z/5Dy1QooqGAX+vaZ/aNM=
-robpike.io/ivy v0.3.1/go.mod h1:F033/ungZgZOIji0XyMA0zfFfOwi3SA8d0BsCyJp7n8=
 zombiezen.com/go/bass v0.0.0-20230225022050-74028357c0a4 h1:LiM3niXTNl5x4Srikq8lst+fqPqYaCyJBVmEDiCqaTg=
 zombiezen.com/go/bass v0.0.0-20230225022050-74028357c0a4/go.mod h1:QHwUcBo15TvSHjANRUkyOo2+jTeE0OS0UkqST4+Og9k=
 zombiezen.com/go/log v1.1.0 h1:AOtu8qHcBZ8n6rC8K56oImtkqSus0lqT+e7EWD9CWoI=

@@ -35,7 +35,7 @@ buildGoModule {
     mkdir -p $out/share/jupyter/kernels/ivy
     {
       echo '{'
-      echo "  \"argv\": [\"$out/bin/jupyter-ivy\", \"--debug\", \"--\", \"{connection_file}\"],"
+      echo "  \"argv\": [\"$out/bin/jupyter-ivy\", \"--\", \"{connection_file}\"],"
       echo '  "display_name": "Ivy",'
       echo '  "language": "ivy"'
       echo '}'
