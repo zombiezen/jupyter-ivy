@@ -212,6 +212,15 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 	stderr := new(bytes.Buffer)
 	ivyrun.Ivy(h.ivyContext, reqContent.Code, stdout, stderr)
 
+	if gotStdout := strings.TrimPrefix(stdout.String(), "\n"); gotStdout != "" {
+		err := h.reply(ctx, h.iopubSocket, "stream", nil, req.RawHeader, StreamResponse{
+			Name: "stdout",
+			Text: gotStdout,
+		})
+		if err != nil {
+			return err
+		}
+	}
 	if stderr.Len() > 0 {
 		err := h.reply(ctx, h.iopubSocket, "stream", nil, req.RawHeader, StreamResponse{
 			Name: "stderr",
@@ -220,17 +229,6 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 		if err != nil {
 			return err
 		}
-	}
-	err = h.reply(ctx, h.iopubSocket, "execute_result", nil, req.RawHeader, ExecuteResult{
-		ExecutionCount: executionCount,
-		DisplayData: DisplayData{
-			Data: map[string]any{
-				"text/plain": stdout.String(),
-			},
-		},
-	})
-	if err != nil {
-		return err
 	}
 	err = h.reply(ctx, h.iopubSocket, "status", nil, req.RawHeader, StatusResponse{
 		ExecutionState: "idle",
