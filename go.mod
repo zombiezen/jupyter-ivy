@@ -5,7 +5,6 @@ go 1.20
 require (
 	github.com/google/uuid v1.3.0
 	github.com/spf13/cobra v1.7.0
-	github.com/zeromq/goczmq v4.1.0+incompatible
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63
 	robpike.io/ivy v0.2.11
 	zombiezen.com/go/bass v0.0.0-20230225022050-74028357c0a4

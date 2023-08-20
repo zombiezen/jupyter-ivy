@@ -13,12 +13,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
-	"github.com/zeromq/goczmq"
 	"robpike.io/ivy/config"
 	"robpike.io/ivy/exec"
 	ivyrun "robpike.io/ivy/run"
 	"robpike.io/ivy/value"
 	"zombiezen.com/go/bass/sigterm"
+	"zombiezen.com/go/jupyter-ivy/internal/zmq"
 	"zombiezen.com/go/log"
 )
 
@@ -47,36 +47,36 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 	if err != nil {
 		return err
 	}
+	z, err := zmq.New(nil)
+	if err != nil {
+		return err
+	}
+	defer z.Close()
 
-	rawHeartbeatSocket, err := goczmq.NewRep(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.HeartbeatPort))
+	heartbeatSocket, err := z.NewRep(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.HeartbeatPort))
 	if err != nil {
 		return err
 	}
-	heartbeatSocket := wrapSocket(rawHeartbeatSocket)
 	defer heartbeatSocket.Close()
-	rawIOPubSocket, err := goczmq.NewPub(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.IOPubPort))
+	iopubSocket, err := z.NewPub(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.IOPubPort))
 	if err != nil {
 		return err
 	}
-	iopubSocket := wrapSocket(rawIOPubSocket)
 	defer iopubSocket.Close()
-	rawControlSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ControlPort))
+	controlSocket, err := z.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ControlPort))
 	if err != nil {
 		return err
 	}
-	controlSocket := wrapSocket(rawControlSocket)
 	defer controlSocket.Close()
-	rawStdinSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.StdinPort))
+	stdinSocket, err := z.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.StdinPort))
 	if err != nil {
 		return err
 	}
-	stdinSocket := wrapSocket(rawStdinSocket)
 	defer stdinSocket.Close()
-	rawShellSocket, err := goczmq.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ShellPort))
+	shellSocket, err := z.NewRouter(fmt.Sprintf("%s://%s:%d", cfg.Transport, cfg.IP, cfg.ShellPort))
 	if err != nil {
 		return err
 	}
-	shellSocket := wrapSocket(rawShellSocket)
 	defer shellSocket.Close()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -111,8 +111,9 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 		iopubSocket: iopubSocket,
 		ivyContext:  exec.NewContext(new(config.Config)),
 	}
+	buf := make([]byte, 1<<20) // 1 MiB
 	for {
-		rawMessage, err := shellSocket.RecvMessage(ctx)
+		rawMessage, err := shellSocket.RecvMessage(ctx, buf)
 		if err != nil {
 			log.Debugf(ctx, "Shell socket disconnected: %v", err)
 			return nil
@@ -177,8 +178,8 @@ func run(ctx context.Context, cfg *kernelConfig) error {
 type handler struct {
 	sessionID   string
 	auth        Authentication
-	shellSocket *concurrent0MQSocket
-	iopubSocket *concurrent0MQSocket
+	shellSocket *zmq.Socket
+	iopubSocket *zmq.Socket
 	ivyContext  value.Context
 
 	executionCounter int
@@ -275,7 +276,7 @@ func (h *handler) kernelInfo(ctx context.Context, req *WireMessage) error {
 	return nil
 }
 
-func (h *handler) reply(ctx context.Context, send *concurrent0MQSocket, typ string, identities [][]byte, parentHeader json.RawMessage, content any) error {
+func (h *handler) reply(ctx context.Context, send *zmq.Socket, typ string, identities [][]byte, parentHeader json.RawMessage, content any) error {
 	response, err := NewWireMessage(typ, h.sessionID, content)
 	if err != nil {
 		return fmt.Errorf("send message: %w", err)
@@ -302,22 +303,28 @@ func (h *handler) reply(ctx context.Context, send *concurrent0MQSocket, typ stri
 	return nil
 }
 
-func heartbeatLoop(ctx context.Context, sock *concurrent0MQSocket) {
+func heartbeatLoop(ctx context.Context, sock *zmq.Socket) {
+	buf := make([]byte, 4096)
 	for {
-		msg, err := sock.RecvMessage(ctx)
+		n, more, err := sock.Recv(ctx, buf)
+		if zmq.IsTruncated(err) {
+			log.Errorf(ctx, "Heartbeat: %v", err)
+			continue
+		}
 		if err != nil {
 			log.Debugf(ctx, "No longer receiving heartbeats: %v", err)
 			return
 		}
-		if err := sock.SendMessage(ctx, msg); err != nil {
+		if _, err := sock.Send(ctx, buf[:n], more); err != nil {
 			log.Debugf(ctx, "Failed to send heartbeat: %v", err)
 		}
 	}
 }
 
-func handleControl(ctx context.Context, auth Authentication, sock *concurrent0MQSocket, cancel context.CancelFunc) {
+func handleControl(ctx context.Context, auth Authentication, sock *zmq.Socket, cancel context.CancelFunc) {
+	buf := make([]byte, 4096)
 	for {
-		rawMessage, err := sock.RecvMessage(ctx)
+		rawMessage, err := sock.RecvMessage(ctx, buf)
 		if err != nil {
 			log.Errorf(ctx, "Control socket disconnected: %v", err)
 			return
@@ -340,9 +347,9 @@ func handleControl(ctx context.Context, auth Authentication, sock *concurrent0MQ
 	}
 }
 
-func drainSocket(ctx context.Context, sock *concurrent0MQSocket) {
+func drainSocket(ctx context.Context, sock *zmq.Socket) {
 	for {
-		if _, err := sock.RecvMessage(ctx); err != nil {
+		if _, _, err := sock.Recv(ctx, nil); err != nil && !zmq.IsTruncated(err) {
 			return
 		}
 	}

@@ -1,7 +1,6 @@
 { buildGoModule
 , nix-gitignore
-, czmq
-, libsodium
+, zeromq
 , pkg-config
 }:
 
@@ -18,13 +17,12 @@ buildGoModule {
     filter = nix-gitignore.gitignoreFilterPure (_: _: true) patterns root;
   };
 
-  vendorHash = "sha256-LA1jdSSN3AoNsgO+EKmTfjUBapWRHa0+H9sKZDo0Nsg=";
+  vendorHash = "sha256-dQ0Ni2AnK0fO7/5YxYvHQ9SBbiSOXNbPaE/kkssoDoI=";
 
   ldflags = [ "-s" "-w" ];
 
   buildInputs = [
-    czmq
-    libsodium
+    zeromq
   ];
 
   nativeBuildInputs = [
