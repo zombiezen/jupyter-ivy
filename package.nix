@@ -1,4 +1,5 @@
-{ buildGoModule
+{ lib
+, buildGoModule
 , nix-gitignore
 , zeromq
 , pkg-config
@@ -39,4 +40,11 @@ buildGoModule {
       echo '}'
     } > $out/share/jupyter/kernels/ivy/kernel.json
   '';
+
+  meta = {
+    description = "A Jupyter kernel for the Ivy programming language";
+    homepage = "https://github.com/zombiezen/jupyter-ivy";
+    license = lib.licenses.asl20;
+    maintainers = [ lib.maintainers.zombiezen ];
+  };
 }
