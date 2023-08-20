@@ -37,6 +37,8 @@
           program = "${self.packages.${system}.default}/bin/jupyter-ivy";
         };
 
+        checks.package = self.packages.${system}.default;
+
         devShells.default = pkgs.mkShell {
           packages = [
             (pkgs.python3.withPackages (ps: [
