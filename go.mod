@@ -8,6 +8,7 @@ require (
 	golang.org/x/exp v0.0.0-20230817173708-d852ddb80c63
 	robpike.io/ivy v0.2.11
 	zombiezen.com/go/bass v0.0.0-20230225022050-74028357c0a4
+	zombiezen.com/go/batchio v0.0.0-20220823000009-0e5610a4795f
 	zombiezen.com/go/log v1.1.0
 )
 

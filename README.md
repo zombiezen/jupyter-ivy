@@ -1,14 +1,14 @@
 # Jupyter kernel for Ivy
 
-A [Jupyter][] [kernel][] for the [ivy][] programming language.
+A [Jupyter][] [kernel][] for [Rob Pike's ivy language][].
 This allows using Ivy expressions inside a Jupyter notebook.
 I made this primarily for my personal use, so there may be rough edges.
 
 ![Screenshot of a Jupyter notebook with the Ivy demo.](demo_screenshot.png)
 
-[ivy]: https://pkg.go.dev/robpike.io/ivy
 [Jupyter]: https://jupyter.org/
 [kernel]: https://docs.jupyter.org/en/latest/projects/kernels.html
+[Rob Pike's ivy language]: https://pkg.go.dev/robpike.io/ivy
 
 ## Installation
 

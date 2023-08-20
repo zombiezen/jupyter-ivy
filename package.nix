@@ -34,7 +34,7 @@ buildGoModule {
     filter = nix-gitignore.gitignoreFilterPure (_: _: true) patterns root;
   };
 
-  vendorHash = "sha256-dQ0Ni2AnK0fO7/5YxYvHQ9SBbiSOXNbPaE/kkssoDoI=";
+  vendorHash = "sha256-LQypp9zfYF7TBsv/TnAQc+nHggWuLV35H8+6+cIXFwQ=";
 
   ldflags = [ "-s" "-w" ];
 

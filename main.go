@@ -17,23 +17,27 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"robpike.io/ivy/config"
 	"robpike.io/ivy/exec"
+	"robpike.io/ivy/parse"
 	ivyrun "robpike.io/ivy/run"
+	"robpike.io/ivy/scan"
 	"robpike.io/ivy/value"
 	"zombiezen.com/go/bass/sigterm"
+	"zombiezen.com/go/batchio"
 	"zombiezen.com/go/jupyter-ivy/internal/zmq"
 	"zombiezen.com/go/log"
 )
@@ -214,7 +218,7 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 		return err
 	}
 	executionCount := h.executionCounter + 1
-	if reqContent.StoreHistory {
+	if !reqContent.Silent && reqContent.StoreHistory {
 		h.executionCounter++
 	}
 	err = h.reply(ctx, h.iopubSocket, "execute_input", nil, req.RawHeader, map[string]any{
@@ -225,28 +229,46 @@ func (h *handler) execute(ctx context.Context, req *WireMessage) error {
 		return err
 	}
 
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
-	ivyrun.Ivy(h.ivyContext, reqContent.Code, stdout, stderr)
+	const outBatchSize = 4096
+	const outBatchTime = 250 * time.Millisecond
+	ivyInput := reqContent.Code
+	if !strings.HasSuffix(ivyInput, "\n") {
+		ivyInput += "\n"
+	}
+	scanner := scan.New(h.ivyContext, " ", strings.NewReader(ivyInput))
+	parser := parse.NewParser(" ", scanner, h.ivyContext)
 
-	if gotStdout := strings.TrimPrefix(stdout.String(), "\n"); gotStdout != "" {
-		err := h.reply(ctx, h.iopubSocket, "stream", nil, req.RawHeader, StreamResponse{
-			Name: "stdout",
-			Text: gotStdout,
-		})
-		if err != nil {
-			return err
-		}
+	var stdout, stderr *batchio.Writer
+	if reqContent.Silent {
+		h.ivyContext.Config().SetOutput(io.Discard)
+		h.ivyContext.Config().SetErrOutput(io.Discard)
+	} else {
+		stdout = batchio.NewWriter(outputStream{
+			ctx:          ctx,
+			streamName:   "stdout",
+			parentHeader: req.RawHeader,
+			handler:      h,
+		}, outBatchSize, outBatchTime)
+		h.ivyContext.Config().SetOutput(stdout)
+		stderr = batchio.NewWriter(outputStream{
+			ctx:          ctx,
+			streamName:   "stderr",
+			parentHeader: req.RawHeader,
+			handler:      h,
+		}, outBatchSize, outBatchTime)
+		h.ivyContext.Config().SetErrOutput(stderr)
 	}
-	if stderr.Len() > 0 {
-		err := h.reply(ctx, h.iopubSocket, "stream", nil, req.RawHeader, StreamResponse{
-			Name: "stderr",
-			Text: stderr.String(),
-		})
-		if err != nil {
-			return err
-		}
+
+	for !ivyrun.Run(parser, h.ivyContext, false) {
 	}
+
+	if stdout != nil {
+		h.ivyContext.Config().SetOutput(io.Discard)
+		h.ivyContext.Config().SetErrOutput(io.Discard)
+		stdout.Flush()
+		stderr.Flush()
+	}
+
 	err = h.reply(ctx, h.iopubSocket, "status", nil, req.RawHeader, StatusResponse{
 		ExecutionState: "idle",
 	})
@@ -317,6 +339,24 @@ func (h *handler) reply(ctx context.Context, send *zmq.Socket, typ string, ident
 	}
 	log.Debugf(ctx, "Sent %q message", typ)
 	return nil
+}
+
+type outputStream struct {
+	ctx          context.Context
+	streamName   string
+	parentHeader json.RawMessage
+	handler      *handler
+}
+
+func (s outputStream) Write(p []byte) (n int, err error) {
+	err = s.handler.reply(s.ctx, s.handler.iopubSocket, "stream", nil, s.parentHeader, StreamResponse{
+		Name: s.streamName,
+		Text: string(p),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func heartbeatLoop(ctx context.Context, sock *zmq.Socket) {
